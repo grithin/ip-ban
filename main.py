@@ -267,7 +267,7 @@ def export_bans(bans):
 		f.write("iptables-save | grep -v ip\\-ban | iptables-restore\n")
 		f.write("# write rules\n")
 		for ban in bans:
-			f.write("iptables -I INPUT -s "+ban+" -j DROP\n")
+			f.write("iptables -I INPUT -s "+ban+" -m comment --comment \"ip-ban\" -j DROP\n")
 
 def patch_iptables_save(input_file, output_file, bans):
 	"""
@@ -281,7 +281,7 @@ def patch_iptables_save(input_file, output_file, bans):
 
 	ban_block = (
 		[IPTABLES_BEGIN + '\n'] +
-		[f"-A INPUT -s {ban} -j DROP\n" for ban in bans] +
+		[f"-A INPUT -s {ban} -m comment --comment \"ip-ban\" -j DROP\n" for ban in bans] +
 		[IPTABLES_END + '\n']
 	)
 
