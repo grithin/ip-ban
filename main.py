@@ -179,6 +179,8 @@ def get_external_ban(ip_int):
 	ip = ipaddress.IPv4Address(ip_int)
 	for ext in bs.query(models.CidrExternal).all():
 		network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ext.ip_start)}/{ext.net}")
+		if is_local_network(network):
+			continue
 		if ip in network:
 			return ext
 	return None
@@ -187,6 +189,11 @@ def get_external_ban(ip_int):
 
 
 # --- Ban consolidation ---
+
+def is_local_network(network):
+	return (network.is_private or network.is_loopback or
+		network.is_reserved or network.is_link_local or
+		network.is_multicast)
 
 def is_whitelisted(ip_start_int, net):
 	network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ip_start_int)}/{net}")
@@ -230,6 +237,9 @@ def make_consolidated_bans():
 	bans = []
 	for ip_start, net, cidr_string in sorted_candidates:
 		network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ip_start)}/{net}")
+
+		if is_local_network(network):
+			continue
 
 		if any(network.overlaps(wl) for wl in whitelist):
 			print(f'Skipping whitelisted range: {cidr_string}')
