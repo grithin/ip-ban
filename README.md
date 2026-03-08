@@ -72,7 +72,17 @@ iptables-restore < /etc/iptables/rules.v4
 
 Or patch in place and it will be picked up automatically on next boot/`netfilter-persistent reload`.
 
-The patch command uses `# BEGIN ip-ban` / `# END ip-ban` block markers. On the first run it inserts the block before the `COMMIT` line in the `*filter` table. On subsequent runs it replaces the existing block, so re-running after adding new bans is safe.
+The `make` command combines both steps — captures live iptables state via `iptables-save` and writes a ready-to-restore file:
+
+```sh
+# Capture live iptables, inject bans, write to out/rules.v4
+python3 main.py make
+
+# Write to a specific path and apply immediately
+python3 main.py make /etc/iptables/rules.v4 && iptables-restore < /etc/iptables/rules.v4
+```
+
+All three commands (`export`, `patch`, `make`) use `# BEGIN ip-ban` / `# END ip-ban` block markers. On the first run the block is inserted before the `COMMIT` line in the `*filter` table. On subsequent runs it replaces the existing block, so re-running after adding new bans is safe.
 
 ## External CIDR lists (Firehol, Spamhaus, shared exports)
 

@@ -1,6 +1,8 @@
 import os
 import sys
 import csv
+import subprocess
+import tempfile
 import ipaddress
 import tools
 import models
@@ -489,6 +491,21 @@ elif cmd == 'patch':
 	output_file = sys.argv[3] if len(sys.argv) > 3 else input_file
 	patch_iptables_save(input_file, output_file, make_consolidated_bans())
 
+elif cmd == 'make':
+	outfile = sub if sub else 'out/rules.v4'
+	result = subprocess.run(['iptables-save'], capture_output=True, text=True)
+	if result.returncode != 0:
+		print(f"iptables-save failed: {result.stderr.strip()}")
+		sys.exit(1)
+	with tempfile.NamedTemporaryFile(mode='w', suffix='.v4', delete=False) as tmp:
+		tmp.write(result.stdout)
+		tmp_path = tmp.name
+	try:
+		patch_iptables_save(tmp_path, outfile, make_consolidated_bans())
+	finally:
+		os.unlink(tmp_path)
+	print(f"Apply with: iptables-restore < {outfile}")
+
 elif cmd == 'import':
 	if sub == 'cidr':
 		if len(sys.argv) < 4:
@@ -544,5 +561,5 @@ elif cmd == 'wp-import':
 
 else:
 	print(f"Unknown command: {cmd!r}")
-	print("Usage: python3 main.py [full|bans|export [cidr [file]]|patch <file> [out]|import cidr <file>|wp-import <wp-config.php>|test <IP>|whitelist <add|list|load>]")
+	print("Usage: python3 main.py [full|bans|export [cidr [file]]|patch <file> [out]|make [outfile]|import cidr <file>|wp-import <wp-config.php>|test <IP>|whitelist <add|list|load>]")
 	sys.exit(1)
