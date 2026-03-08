@@ -427,6 +427,7 @@ sub = sys.argv[2] if len(sys.argv) > 2 else ''
 
 if cmd == 'full':
 	load_ip_logs()
+	load_cidr_lists()
 	apply_ip_logs_to_cird_marks()
 	add_block16_marks()
 	make_cidr_bans()
