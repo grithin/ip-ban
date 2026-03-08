@@ -9,6 +9,7 @@ from sqlalchemy import func, and_
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import sessionmaker
 import db
+import wp_import
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 lists_dir = os.path.join(script_dir, 'ip-ban-lists')
@@ -498,7 +499,13 @@ elif cmd == 'whitelist':
 		print("Usage: python3 main.py whitelist <add <CIDR> [note] | list | load>")
 		sys.exit(1)
 
+elif cmd == 'wp-import':
+	if not sub:
+		print("Usage: python3 main.py wp-import <wp-config.php path>")
+		sys.exit(1)
+	wp_import.import_wp_spam(sub, bs, models)
+
 else:
 	print(f"Unknown command: {cmd!r}")
-	print("Usage: python3 main.py [full|bans|export [cidr [file]]|patch <file> [out]|import cidr <file>|test <IP>|whitelist <add|list|load>]")
+	print("Usage: python3 main.py [full|bans|export [cidr [file]]|patch <file> [out]|import cidr <file>|wp-import <wp-config.php>|test <IP>|whitelist <add|list|load>]")
 	sys.exit(1)

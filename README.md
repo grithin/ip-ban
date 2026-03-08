@@ -131,6 +131,25 @@ python3 main.py export cidr /path/to/my-bans.netset
 
 The exported format is compatible with the importer. Note that shared lists are less authoritative than Firehol/Spamhaus — they reflect one server's observed spam, not vetted research.
 
+## WordPress import
+
+Pull spam comment IPs directly from a WordPress database:
+
+```sh
+pip install pymysql
+python3 main.py wp-import /path/to/wordpress/wp-config.php
+```
+
+Reads DB credentials from `wp-config.php`, queries `wp_comments` where `comment_approved = 'spam'` (set by Akismet and manual moderation), and loads IPs into `ip_log`. Tracks the last import date per WordPress source — re-running only pulls spam newer than the previous import.
+
+After importing, run the scoring pipeline to update bans:
+
+```sh
+python3 main.py full
+```
+
+IPv6 addresses are skipped (iptables IPv4 only).
+
 ## Whitelist
 
 Prevent specific IPs or ranges from appearing in the ban output.
