@@ -1,0 +1,13 @@
+*.ignore.*
+*.ignore
+__pycache__/
+*.pyc
+
+# database
+sqlite3.db
+
+# input/output data (server-specific, not for public repo)
+ip-ban-lists/
+ip-ban-cidr-lists/
+ip-ban-whitelist/
+out/
