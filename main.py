@@ -84,7 +84,6 @@ def create_cidr_blocks(ip):
 		start_ip_int = int(start_ip)
 		stmt = insert(models.CidrScore).values({"ip_start":start_ip_int, "marks":0, "net":32-i}).on_conflict_do_nothing(index_elements=['ip_start','net'])
 		bs.execute(stmt)
-	bs.commit()
 
 def mark_cidr_score(ip):
 	for i in range(9):
@@ -99,10 +98,12 @@ def update_cidr_score(ip):
 def apply_ip_logs_to_cird_marks():
 	print('Updating cidr scores from logs')
 	logs = bs.query(models.IpLog).filter(models.IpLog.processed==False)
-	for log in logs:
+	for i, log in enumerate(logs):
 		ip = ipaddress.IPv4Address(log.ip)
 		update_cidr_score(ip)
 		log.processed = True
+		if i % 500 == 499:
+			bs.commit()
 	bs.commit()
 
 def find_block16s(ip, net):
@@ -188,45 +189,64 @@ def get_external_ban(ip_int):
 # --- Ban consolidation ---
 
 def is_whitelisted(ip_start_int, net):
-	ban_network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ip_start_int)}/{net}")
+	network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ip_start_int)}/{net}")
 	for entry in bs.query(models.IpWhitelist).all():
-		wl_network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(entry.ip_start)}/{entry.net}")
-		if ban_network.overlaps(wl_network):
+		wl = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(entry.ip_start)}/{entry.net}")
+		if network.overlaps(wl):
 			return True
 	return False
+
 
 def make_consolidated_bans():
 	print('Generating consolidated bans')
 
 	# Collect candidates from both internal bans and external imports
-	# keyed by (ip_start, net) to deduplicate
 	candidates = {}
 	for ban in bs.query(models.CidrBan).all():
-		key = (ban.ip_start, ban.net)
-		candidates[key] = ban.cidr_string
+		candidates[(ban.ip_start, ban.net)] = ban.cidr_string
 	for ext in bs.query(models.CidrExternal).all():
-		key = (ext.ip_start, ext.net)
-		candidates[key] = ext.cidr_string
+		candidates[(ext.ip_start, ext.net)] = ext.cidr_string
 
-	# Build network objects once
-	networks = {
-		(ip_start, net): ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ip_start)}/{net}")
-		for ip_start, net in candidates
-	}
+	# Load whitelist once
+	whitelist = [
+		ipaddress.IPv4Network(f"{ipaddress.IPv4Address(e.ip_start)}/{e.net}")
+		for e in bs.query(models.IpWhitelist).all()
+	]
+
+	# Sort largest ranges first (ascending prefix length) so parents are always
+	# processed before their subnets.
+	sorted_candidates = sorted(
+		[(ip_start, net, cidr_string) for (ip_start, net), cidr_string in candidates.items()],
+		key=lambda x: x[1]
+	)
+
+	# O(n*32) supernet check using integer math instead of O(n²) supernet_of() loop.
+	# accepted_set holds (masked_network_address, prefix_len) for each accepted range.
+	# For a candidate at (ip_start, net), its parent at prefix p has address:
+	#   ip_start & (0xFFFFFFFF << (32-p))
+	accepted_set = set()
+	accepted_prefix_lens = set()
 
 	bans = []
-	for (ip_start, net), cidr_string in candidates.items():
-		if is_whitelisted(ip_start, net):
+	for ip_start, net, cidr_string in sorted_candidates:
+		network = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(ip_start)}/{net}")
+
+		if any(network.overlaps(wl) for wl in whitelist):
 			print(f'Skipping whitelisted range: {cidr_string}')
 			continue
 
-		# Skip if a parent range already covers this one
-		network = networks[(ip_start, net)]
-		covered = any(
-			other_net < net and other_network.supernet_of(network)
-			for (other_ip, other_net), other_network in networks.items()
-		)
+		covered = False
+		for p in accepted_prefix_lens:
+			if p >= net:
+				continue
+			mask = (0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF
+			if (ip_start & mask, p) in accepted_set:
+				covered = True
+				break
+
 		if not covered:
+			accepted_set.add((ip_start, net))
+			accepted_prefix_lens.add(net)
 			bans.append(cidr_string)
 
 	return bans
@@ -323,6 +343,10 @@ def import_cidr_file(filepath):
 
 	existing = bs.query(models.CidrListFile).filter_by(file=filename).first()
 	if existing:
+		file_mtime = datetime.fromtimestamp(os.path.getmtime(filepath)).date()
+		if file_mtime <= existing.date:
+			print(f"Skipping unchanged {filename}")
+			return
 		# Re-sync: delete old entries then re-import
 		bs.query(models.CidrExternal).filter_by(file_id=existing.id).delete()
 		existing.date = datetime.now()
@@ -357,6 +381,8 @@ def import_cidr_file(filepath):
 			}).on_conflict_do_nothing(index_elements=['ip_start', 'net', 'file_id'])
 			bs.execute(stmt)
 			count += 1
+			if count % 1000 == 0:
+				bs.commit()
 
 	bs.commit()
 	print(f"Imported {count} CIDRs from {filename}")

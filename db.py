@@ -2,6 +2,12 @@ import sqlalchemy
 import models
 engine = sqlalchemy.create_engine("sqlite:///sqlite3.db")
 
+# Enable WAL mode and reduce fsync overhead — significant speedup for write-heavy workloads
+with engine.connect() as _conn:
+	_conn.execute(sqlalchemy.text("PRAGMA journal_mode=WAL"))
+	_conn.execute(sqlalchemy.text("PRAGMA synchronous=NORMAL"))
+	_conn.commit()
+
 
 def setup(reset=False, force_remake=False):
 	if reset:
