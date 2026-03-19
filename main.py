@@ -268,6 +268,14 @@ def make_consolidated_bans():
 
 IPTABLES_BEGIN = '# BEGIN ip-ban'
 IPTABLES_END = '# END ip-ban'
+NFTABLES_TABLE = 'ip ban'
+NFTABLES_CHAIN = 'hammer'
+NFTABLES_BEGIN = '# BEGIN ip-ban'
+NFTABLES_END = '# END ip-ban'
+
+IPSET_NAME = 'banlist'
+IPSET_BEGIN = '# BEGIN ip-ban-ipset'
+IPSET_END = '# END ip-ban-ipset'
 
 # --- Export ---
 
@@ -343,6 +351,195 @@ def export_cidr_list(outfile=None):
 		for ban in sorted(bans, key=lambda c: ipaddress.IPv4Network(c)):
 			f.write(ban + "\n")
 	print(f"Exported {len(bans)} CIDRs to {outfile}")
+
+
+
+# --- nftables export ---
+
+def export_nftables(bans, outfile=None):
+	"""Export bans as nftables script."""
+	if outfile is None:
+		outfile = 'out/rules.nft'
+	out_dir = os.path.dirname(outfile)
+	if out_dir:
+		os.makedirs(out_dir, exist_ok=True)
+	with open(outfile, 'w') as f:
+		f.write("#!/usr/sbin/nft -f\n")
+		f.write(f"# ip-ban export {datetime.now().strftime('%Y-%m-%d')}\n\n")
+		f.write(f"table {NFTABLES_TABLE} {{\n")
+		f.write(f"    chain {NFTABLES_CHAIN} {{\n")
+		for ban in bans:
+			f.write(f"        ip saddr {ban} counter drop\n")
+		f.write("    }\n")
+		f.write("}\n")
+	print(f"Exported {len(bans)} bans to {outfile}")
+
+def patch_nftables_save(input_file, output_file, bans):
+	"""
+	Inject ip-ban rules into an nftables ruleset file.
+	Creates or replaces the ip-ban block within the ban chain.
+	"""
+	with open(input_file, 'r') as f:
+		content = f.read()
+
+	ban_block = (
+		f"{NFTABLES_BEGIN}\n" +
+		"".join([f"        ip saddr {ban} counter drop\n" for ban in bans]) +
+		f"{NFTABLES_END}\n"
+	)
+
+	# Check if our table exists
+	if f"table {NFTABLES_TABLE}" not in content:
+		# Create new ruleset with our table
+		rules = '\n'.join([f"        ip saddr {ban} counter drop" for ban in bans])
+		result = f"""#!/usr/sbin/nft -f
+# ip-ban export {datetime.now().strftime('%Y-%m-%d')}
+
+table {NFTABLES_TABLE} {{
+    chain {NFTABLES_CHAIN} {{
+{rules}
+    }}
+}}
+"""
+		print(f"Created new nftables table with {len(bans)} bans")
+	else:
+		# Try to find and replace existing block
+		lines = content.split('\n')
+		result_lines = []
+		in_ban_chain = False
+		found_chain = False
+		in_ban_block = False
+		indent = "    "
+
+		for line in lines:
+			stripped = line.strip()
+
+			# Find our chain
+			if f"chain {NFTABLES_CHAIN}" in stripped:
+				found_chain = True
+				in_ban_chain = True
+
+			# End of our chain
+			if in_ban_chain and stripped == '}' and not in_ban_block:
+				in_ban_chain = False
+
+			# Replace existing ban block
+			if in_ban_chain and stripped == NFTABLES_BEGIN:
+				in_ban_block = True
+				result_lines.append(line)  # Keep BEGIN marker
+				result_lines.append(ban_block[ban_block.index('\n')+1:])  # Add new rules
+				continue
+
+			if in_ban_block and stripped == NFTABLES_END:
+				in_ban_block = False
+				result_lines.append(line)  # Keep END marker
+				continue
+
+			if in_ban_block:
+				continue  # Skip old rules
+
+			result_lines.append(line)
+
+		if not found_chain:
+			# Add chain to existing table
+			result = '\n'.join(result_lines)
+			result = result.replace(
+				f"table {NFTABLES_TABLE} {{",
+				f"table {NFTABLES_TABLE} {{\n    chain {NFTABLES_CHAIN} {{\n{ban_block}    }}"
+			)
+		else:
+			result = '\n'.join(result_lines)
+
+		print(f"Patched {len(bans)} bans into {output_file}")
+
+	with open(output_file, 'w') as f:
+		f.write(result)
+
+
+
+# --- ipset export ---
+
+def export_ipset(bans, outfile=None):
+	"""Export bans as ipset restore commands."""
+	if outfile is None:
+		outfile = 'out/ipset.rules'
+	out_dir = os.path.dirname(outfile)
+	if out_dir:
+		os.makedirs(out_dir, exist_ok=True)
+	with open(outfile, 'w') as f:
+		f.write(f"# ip-ban ipset export {datetime.now().strftime('%Y-%m-%d')}\n")
+		f.write(f"create {IPSET_NAME} hash:net family inet hashsize 16384 maxelem 262144 -exist\n")
+		f.write(f"flush {IPSET_NAME}\n")
+		for ban in bans:
+			f.write(f"add {IPSET_NAME} {ban}\n")
+	print(f"Exported {len(bans)} bans to {outfile}")
+
+def export_ipset_with_iptables(bans, outfile=None):
+	"""Export ipset commands + iptables rule referencing the set."""
+	if outfile is None:
+		outfile = 'out/ipset-iptables.sh'
+	out_dir = os.path.dirname(outfile)
+	if out_dir:
+		os.makedirs(out_dir, exist_ok=True)
+	with open(outfile, 'w') as f:
+		f.write("#!/bin/bash\n")
+		f.write(f"# ip-ban ipset + iptables export {datetime.now().strftime('%Y-%m-%d')}\n\n")
+		f.write(f"# Create/set up ipset\n")
+		f.write(f"ipset create {IPSET_NAME} hash:net family inet hashsize 16384 maxelem 262144 -exist 2>/dev/null\n")
+		f.write(f"ipset flush {IPSET_NAME}\n")
+		f.write("\n# Add IPs to set\n")
+		for ban in bans:
+			f.write(f"ipset add {IPSET_NAME} {ban} -exist\n")
+		f.write("\n# iptables rule to drop matching traffic\n")
+		f.write(f"iptables -D INPUT -m set --match-set {IPSET_NAME} src -j DROP 2>/dev/null || true\n")
+		f.write(f"iptables -I INPUT -m set --match-set {IPSET_NAME} src -j DROP -m comment --comment \"ip-ban-ipset\"\n")
+	print(f"Exported {len(bans)} bans to {outfile}")
+
+def patch_ipset_save(input_file, output_file, bans):
+	"""
+	Inject ip-ban rules into an ipset restore file.
+	Replaces the ipset block within the file.
+	"""
+	with open(input_file, 'r') as f:
+		lines = f.readlines()
+
+	ipset_block = (
+		[f"{IPSET_BEGIN}\n"] +
+		[f"add {IPSET_NAME} {ban}\n" for ban in bans] +
+		[f"{IPSET_END}\n"]
+	)
+
+	# Find existing block
+	start_idx = None
+	end_idx = None
+	for i, line in enumerate(lines):
+		if line.strip() == IPSET_BEGIN:
+			start_idx = i
+		elif line.strip() == IPSET_END and start_idx is not None:
+			end_idx = i
+			break
+
+	if start_idx is not None and end_idx is not None:
+		result = lines[:start_idx] + ipset_block + lines[end_idx+1:]
+		print(f"Replaced existing ipset block ({end_idx - start_idx - 1} old entries → {len(bans)} new entries)")
+	else:
+		# Insert before any existing flush or add commands, or at end
+		result = []
+		inserted = False
+		for line in lines:
+			stripped = line.strip()
+			# Replace flush with our block
+			if stripped.startswith('flush ') or stripped.startswith('add '):
+				if not inserted:
+					result.extend(ipset_block)
+					inserted = True
+			result.append(line)
+		if not inserted:
+			result.extend(ipset_block)
+		print(f"Inserted {len(bans)} entries into {output_file}")
+
+	with open(output_file, 'w') as f:
+		f.writelines(result)
 
 
 
@@ -476,7 +673,37 @@ elif cmd == 'bans':
 	print(make_consolidated_bans())
 
 elif cmd == 'export':
-	if sub == 'cidr':
+	# Parse -t flag
+	backend = None
+	export_args = []
+	args = sys.argv[2:]
+	i = 0
+	while i < len(args):
+		arg = args[i]
+		if arg == '-t' and i + 1 < len(args):
+			backend = args[i + 1]
+			i += 2  # Skip -t and its value
+		else:
+			export_args.append(arg)
+			i += 1
+
+	if backend == 'nf':
+		outfile = export_args[0] if export_args else 'out/rules.nft'
+		export_nftables(make_consolidated_bans(), outfile)
+	elif backend == 'i4' or backend == 'iptables':
+		outfile = export_args[0] if export_args else 'out/export.sh'
+		export_bans(make_consolidated_bans())
+		print("Exported to out/export.sh")
+	elif backend == 'ip':
+		outfile = export_args[0] if export_args else 'out/ipset.rules'
+		export_ipset(make_consolidated_bans(), outfile)
+	elif backend == 'ipset':
+		outfile = export_args[0] if export_args else 'out/ipset-iptables.sh'
+		export_ipset_with_iptables(make_consolidated_bans(), outfile)
+	elif backend == 'cidr':
+		outfile = export_args[0] if export_args else 'out/cidr-export.netset'
+		export_cidr_list(outfile)
+	elif backend is None and sub == 'cidr':
 		outfile = sys.argv[3] if len(sys.argv) > 3 else 'out/cidr-export.netset'
 		export_cidr_list(outfile)
 	else:
@@ -485,26 +712,76 @@ elif cmd == 'export':
 
 elif cmd == 'patch':
 	if not sub:
-		print("Usage: python3 main.py patch <iptables-save-file> [output-file]")
+		print("Usage: python3 main.py patch <ruleset-file> [output-file]")
+		print("       Detects iptables vs nftables based on content")
 		sys.exit(1)
 	input_file = sub
 	output_file = sys.argv[3] if len(sys.argv) > 3 else input_file
-	patch_iptables_save(input_file, output_file, make_consolidated_bans())
+
+	# Auto-detect format
+	with open(input_file, 'r') as f:
+		content = f.read(500)
+
+	if '*filter' in content or 'iptables' in content:
+		patch_iptables_save(input_file, output_file, make_consolidated_bans())
+	elif 'table' in content and 'chain' in content:
+		patch_nftables_save(input_file, output_file, make_consolidated_bans())
+	else:
+		print("Could not detect ruleset format (iptables or nftables)")
+		sys.exit(1)
 
 elif cmd == 'make':
-	outfile = sub if sub else 'out/rules.v4'
-	result = subprocess.run(['iptables-save'], capture_output=True, text=True)
-	if result.returncode != 0:
-		print(f"iptables-save failed: {result.stderr.strip()}")
-		sys.exit(1)
-	with tempfile.NamedTemporaryFile(mode='w', suffix='.v4', delete=False) as tmp:
-		tmp.write(result.stdout)
-		tmp_path = tmp.name
-	try:
-		patch_iptables_save(tmp_path, outfile, make_consolidated_bans())
-	finally:
-		os.unlink(tmp_path)
-	print(f"Apply with: iptables-restore < {outfile}")
+	# Parse -t flag
+	backend = None
+	make_args = []
+	args = sys.argv[2:]
+	i = 0
+	while i < len(args):
+		arg = args[i]
+		if arg == '-t' and i + 1 < len(args):
+			backend = args[i + 1]
+			i += 2  # Skip -t and its value
+		else:
+			make_args.append(arg)
+			i += 1
+
+	if backend == 'nf':
+		outfile = make_args[0] if make_args else 'out/rules.nft'
+		result = subprocess.run(['nft', '-s', 'list ruleset'], capture_output=True, text=True)
+		if result.returncode != 0:
+			print(f"nft list ruleset failed: {result.stderr.strip()}")
+			sys.exit(1)
+		with tempfile.NamedTemporaryFile(mode='w', suffix='.nft', delete=False) as tmp:
+			tmp.write(result.stdout)
+			tmp_path = tmp.name
+		try:
+			patch_nftables_save(tmp_path, outfile, make_consolidated_bans())
+		finally:
+			os.unlink(tmp_path)
+		print(f"Apply with: nft -f {outfile}")
+	elif backend == 'ip':
+		outfile = make_args[0] if make_args else 'out/ipset.rules'
+		export_ipset(make_consolidated_bans(), outfile)
+		print(f"Apply with: ipset restore < {outfile}")
+	elif backend == 'ipset':
+		outfile = make_args[0] if make_args else 'out/ipset-iptables.sh'
+		export_ipset_with_iptables(make_consolidated_bans(), outfile)
+		print(f"Apply with: bash {outfile}")
+	else:
+		# Default to iptables
+		outfile = make_args[0] if make_args else 'out/rules.v4'
+		result = subprocess.run(['iptables-save'], capture_output=True, text=True)
+		if result.returncode != 0:
+			print(f"iptables-save failed: {result.stderr.strip()}")
+			sys.exit(1)
+		with tempfile.NamedTemporaryFile(mode='w', suffix='.v4', delete=False) as tmp:
+			tmp.write(result.stdout)
+			tmp_path = tmp.name
+		try:
+			patch_iptables_save(tmp_path, outfile, make_consolidated_bans())
+		finally:
+			os.unlink(tmp_path)
+		print(f"Apply with: iptables-restore < {outfile}")
 
 elif cmd == 'import':
 	if sub == 'cidr':
@@ -561,5 +838,5 @@ elif cmd == 'wp-import':
 
 else:
 	print(f"Unknown command: {cmd!r}")
-	print("Usage: python3 main.py [full|bans|export [cidr [file]]|patch <file> [out]|make [outfile]|import cidr <file>|wp-import <wp-config.php>|test <IP>|whitelist <add|list|load>]")
+	print("Usage: python3 main.py [full|bans|export [-t i4|nf|ip|ipset|cidr] [file]|patch <file> [out]|make [-t i4|nf|ip|ipset] [outfile]|import cidr <file>|wp-import <wp-config.php>|test <IP>|whitelist <add|list|load>]")
 	sys.exit(1)

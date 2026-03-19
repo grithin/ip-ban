@@ -51,12 +51,23 @@ python3 main.py
 # Print consolidated ban list
 python3 main.py bans
 
-# Write iptables shell script to out/export.sh
-python3 main.py export
+# Export bans (-t i4 = iptables, -t nf = nftables, -t ip = ipset, -t ipset = ipset+iptables, -t cidr = netset)
+python3 main.py export -t i4              # iptables script to out/export.sh
+python3 main.py export -t nf               # nftables script to out/rules.nft
+python3 main.py export -t nf /path/to/rules.nft
+python3 main.py export -t ip              # ipset restore format to out/ipset.rules
+python3 main.py export -t ipset           # ipset + iptables script to out/ipset-iptables.sh
 
-# Inject/update rules directly in an iptables-save file
+# Inject bans into existing ruleset file (auto-detects iptables vs nftables)
 python3 main.py patch /etc/iptables/rules.v4
-python3 main.py patch /etc/iptables/rules.v4 out/rules.v4  # write to separate file
+python3 main.py patch /etc/iptables/rules.v4 out/rules.v4
+
+# Capture live firewall state and inject bans (default: iptables)
+python3 main.py make                       # iptables: out/rules.v4
+python3 main.py make -t nf                # nftables: out/rules.nft
+python3 main.py make -t nf /etc/nftables.conf
+python3 main.py make -t ip               # ipset restore: out/ipset.rules
+python3 main.py make -t ipset             # ipset + iptables: out/ipset-iptables.sh
 
 # Check whether a specific IP is banned (shows internal ban, external ban, or whitelist status)
 python3 main.py test 1.2.3.4
@@ -64,7 +75,9 @@ python3 main.py test 1.2.3.4
 
 ### Patching vs shell script export
 
-`export` generates a shell script that manipulates live iptables at runtime. `patch` edits an iptables-save file directly, which is better for persistent rules managed by `iptables-restore` (e.g. `/etc/iptables/rules.v4` on Debian/Ubuntu). After patching, apply with:
+`export` generates a script that manipulates live firewall at runtime. `patch` edits a ruleset file directly, which is better for persistent rules.
+
+**iptables** — After patching, apply with:
 
 ```sh
 iptables-restore < /etc/iptables/rules.v4
@@ -72,17 +85,47 @@ iptables-restore < /etc/iptables/rules.v4
 
 Or patch in place and it will be picked up automatically on next boot/`netfilter-persistent reload`.
 
-The `make` command combines both steps — captures live iptables state via `iptables-save` and writes a ready-to-restore file:
+**nftables** — After patching, apply with:
 
 ```sh
-# Capture live iptables, inject bans, write to out/rules.v4
-python3 main.py make
-
-# Write to a specific path and apply immediately
-python3 main.py make /etc/iptables/rules.v4 && iptables-restore < /etc/iptables/rules.v4
+nft -f /etc/nftables.conf
 ```
 
-All three commands (`export`, `patch`, `make`) use `# BEGIN ip-ban` / `# END ip-ban` block markers. On the first run the block is inserted before the `COMMIT` line in the `*filter` table. On subsequent runs it replaces the existing block, so re-running after adding new bans is safe.
+The `make` command combines both steps — captures live firewall state and writes a ready-to-restore file:
+
+```sh
+# iptables: capture live state, inject bans, write to out/rules.v4
+python3 main.py make
+
+# nftables: capture live state, inject bans, write to out/rules.nft
+python3 main.py make -t nf
+
+# Apply immediately
+python3 main.py make -t nf /etc/nftables.conf && nft -f /etc/nftables.conf
+```
+
+All commands use block markers (`# BEGIN ip-ban` / `# END ip-ban` for iptables, same for nftables). On the first run the block is inserted. On subsequent runs it replaces the existing block, so re-running after adding new bans is safe.
+
+### ipset (recommended for large lists)
+
+Using ipset with iptables is more efficient than thousands of individual rules:
+
+```sh
+# Export ipset restore format + iptables rule
+python3 main.py export -t ipset out/ipset-iptables.sh
+
+# Apply (creates ipset, loads IPs, adds iptables rule)
+bash out/ipset-iptables.sh
+
+# Or just update the ipset without touching iptables
+python3 main.py export -t ip out/ipset.rules
+ipset restore < out/ipset.rules
+```
+
+Benefits:
+- O(1) lookup instead of O(n) rule traversal
+- Single iptables rule references thousands of IPs/CIDRs
+- Easier to update (just modify the set, not iptables)
 
 ## External CIDR lists (Firehol, Spamhaus, shared exports)
 
